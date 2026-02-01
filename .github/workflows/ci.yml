@@ -14,6 +14,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
       - uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.0.3
         with:
           deno-version: "v2.x"
@@ -22,7 +24,7 @@ jobs:
         uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
       - name: Run checks
         shell: >-
-          deno run --config=deno.jsonc --allow-run=deno,nix {0}
+          deno run --config=deno.jsonc --allow-run=deno,git,nix {0}
         run: |
           import { runMain } from "lib/common/run.ts";
           import { ciCheck } from "lib/ci/checks.ts";
