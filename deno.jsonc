@@ -2,8 +2,8 @@
   "imports": {
     "effect": "npm:effect@3.19.14",
     "effect/Effect": "npm:effect@3.19.14/Effect",
-    "effect/Schema": "npm:effect@3.19.14/Schema",
     "effect/Either": "npm:effect@3.19.14/Either",
+    "effect/Schema": "npm:effect@3.19.14/Schema",
     "lib/": "./lib/"
   },
   "compilerOptions": {
@@ -12,9 +12,7 @@
     "useUnknownInCatchVariables": true
   },
   "lint": {
-    "include": [
-      "lib/**/*.ts"
-    ],
+    "include": ["lib/**/*.ts"],
     "exclude": [
       "**/dist/**",
       "**/external/**",
@@ -23,11 +21,7 @@
       "**/result/**"
     ],
     "rules": {
-      "tags": [
-        "recommended",
-        "jsr",
-        "workspace"
-      ],
+      "tags": ["recommended", "jsr", "workspace"],
       "include": [
         "ban-untagged-todo",
         "default-param-last",

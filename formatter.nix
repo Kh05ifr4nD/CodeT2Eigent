@@ -4,10 +4,6 @@
     { config, ... }:
     {
       formatter = config.treefmt.build.wrapper;
-      apps.formatter = {
-        type = "app";
-        program = "${config.treefmt.build.wrapper}/bin/treefmt";
-      };
       treefmt.config = {
         inherit (config.flake-root) projectRootFile;
         programs = {

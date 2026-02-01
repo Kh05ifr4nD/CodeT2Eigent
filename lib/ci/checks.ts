@@ -1,12 +1,14 @@
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
-import type { AppError } from "../common/error.ts";
+import { type AppError, appError } from "../common/error.ts";
 import {
   type CommandOptions,
   defaultCommandOptions,
   runCommand,
 } from "../common/command.ts";
-import { packageConfigs } from "../updater/config.ts";
+import { parseJsonText } from "../common/json.ts";
+import { requireArrayValue } from "../common/jsonValue.ts";
+import type { JsonValue } from "../common/jsonTypes.ts";
 
 function inheritIo(options: CommandOptions): CommandOptions {
   return { ...options, stdout: "inherit", stderr: "inherit" };
@@ -19,15 +21,23 @@ function run(args: ReadonlyArray<string>): Effect.Effect<void, AppError> {
   );
 }
 
-function allFlakePackageTargets(): ReadonlyArray<string> {
-  return Object.keys(packageConfigs).sort().map((name) => `.#${name}`);
-}
-
 function parseNonEmptyLines(text: string): ReadonlyArray<string> {
   return text
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
+}
+
+function requireNonEmptyString(
+  value: string | undefined,
+  context: string,
+): Effect.Effect<string, AppError> {
+  if (typeof value === "string" && value.length > 0) {
+    return Effect.succeed(value);
+  }
+  return Effect.fail(
+    appError.invalidJson(`${context}: expected non-empty string`),
+  );
 }
 
 function uniqueSorted(values: ReadonlyArray<string>): ReadonlyArray<string> {
@@ -43,85 +53,151 @@ function packageNameFromPath(path: string): Option.Option<string> {
   return Option.none();
 }
 
-function isKnownPackage(name: string): boolean {
-  return Object.hasOwn(packageConfigs, name);
-}
-
 function anyGlobalPkgsChange(paths: ReadonlyArray<string>): boolean {
   return paths.some((path) =>
     path.startsWith("pkgs/") && Option.isNone(packageNameFromPath(path))
   );
 }
 
-function resolveChangedPaths(): Effect.Effect<ReadonlyArray<string>, AppError> {
-  return Effect.map(
-    Effect.flatMap(
-      runCommand(
-        ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
-        defaultCommandOptions,
-      ),
-      (line) => {
-        const parts = line.trim().split(/\s+/g).filter((part) =>
-          part.length > 0
+function stringArrayFromJsonValue(
+  value: JsonValue,
+  context: string,
+): Effect.Effect<ReadonlyArray<string>, AppError> {
+  return Effect.flatMap(requireArrayValue(value, context), (array) => {
+    const strings: string[] = [];
+    for (const [index, item] of array.entries()) {
+      if (typeof item !== "string") {
+        return Effect.fail(
+          appError.invalidJson(
+            `${context}: expected string at index ${index}`,
+          ),
         );
-        const parents = parts.slice(1);
+      }
+      strings.push(item);
+    }
+    return Effect.succeed(strings);
+  });
+}
 
-        if (parents.length >= 2) {
-          const base = parents[0];
-          const head = parents[1];
-          if (typeof base !== "string" || typeof head !== "string") {
-            return Effect.succeed("");
-          }
-          return runCommand(
-            ["git", "diff", "--name-only", base, head],
-            defaultCommandOptions,
-          );
-        }
-
-        if (parents.length === 1) {
-          const base = parents[0];
-          if (typeof base !== "string") {
-            return Effect.succeed("");
-          }
-          return runCommand(
-            ["git", "diff", "--name-only", base, "HEAD"],
-            defaultCommandOptions,
-          );
-        }
-
-        return Effect.succeed("");
-      },
+function resolveFlakePackageNames(): Effect.Effect<
+  ReadonlyArray<string>,
+  AppError
+> {
+  return Effect.flatMap(
+    runCommand(
+      [
+        "nix",
+        "eval",
+        "--json",
+        "--impure",
+        "--expr",
+        "let system = builtins.currentSystem; flake = builtins.getFlake (toString ./.); in builtins.attrNames flake.packages.${system}",
+      ],
+      defaultCommandOptions,
     ),
-    parseNonEmptyLines,
+    (stdout) =>
+      Effect.flatMap(
+        parseJsonText(stdout),
+        (json) => stringArrayFromJsonValue(json, "nix eval flake packages"),
+      ),
+  );
+}
+
+function resolveChangedPaths(): Effect.Effect<ReadonlyArray<string>, AppError> {
+  return Effect.flatMap(
+    runCommand(
+      ["git", "rev-list", "--parents", "-n", "1", "HEAD"],
+      defaultCommandOptions,
+    ),
+    (line) => {
+      const parts = line.trim().split(/\s+/g).filter((part) => part.length > 0);
+      if (parts.length === 0) {
+        return Effect.fail(
+          appError.invalidJson(
+            "git rev-list --parents -n 1 HEAD: expected non-empty output",
+          ),
+        );
+      }
+
+      const parents = parts.slice(1);
+
+      if (parents.length >= 2) {
+        return Effect.flatMap(
+          Effect.all([
+            requireNonEmptyString(parents[0], "git rev-list first parent"),
+            requireNonEmptyString(parents[1], "git rev-list second parent"),
+          ]),
+          ([base, head]) =>
+            Effect.map(
+              runCommand(
+                ["git", "diff", "--name-only", base, head],
+                defaultCommandOptions,
+              ),
+              parseNonEmptyLines,
+            ),
+        );
+      }
+
+      if (parents.length === 1) {
+        return Effect.flatMap(
+          requireNonEmptyString(parents[0], "git rev-list parent"),
+          (base) =>
+            Effect.map(
+              runCommand(
+                ["git", "diff", "--name-only", base, "HEAD"],
+                defaultCommandOptions,
+              ),
+              parseNonEmptyLines,
+            ),
+        );
+      }
+
+      return Effect.succeed([]);
+    },
   );
 }
 
 function flakePackageTargets(): Effect.Effect<ReadonlyArray<string>, AppError> {
-  return Effect.map(resolveChangedPaths(), (paths) => {
-    if (anyGlobalPkgsChange(paths)) {
-      return allFlakePackageTargets();
-    }
+  return Effect.flatMap(
+    Effect.all([resolveChangedPaths(), resolveFlakePackageNames()]),
+    ([paths, flakePackageNames]) => {
+      const available = new Set(flakePackageNames);
 
-    const touched = uniqueSorted(
-      paths
-        .map(packageNameFromPath)
-        .flatMap((name) =>
-          Option.isSome(name) && isKnownPackage(name.value) ? [name.value] : []
-        ),
-    );
-    if (touched.length > 0) {
-      return touched.map((name) => `.#${name}`);
-    }
+      if (anyGlobalPkgsChange(paths)) {
+        return Effect.succeed(flakePackageNames.map((name) => `.#${name}`));
+      }
 
-    return [".#default"];
-  });
+      const touched = uniqueSorted(
+        paths
+          .map(packageNameFromPath)
+          .flatMap((name) => (Option.isSome(name) ? [name.value] : [])),
+      );
+
+      const unrecognized = touched.filter((name) => !available.has(name));
+      if (unrecognized.length > 0) {
+        return Effect.fail(appError.unrecognizedPackages(unrecognized));
+      }
+
+      if (touched.length > 0) {
+        return Effect.succeed(touched.map((name) => `.#${name}`));
+      }
+
+      return Effect.succeed([]);
+    },
+  );
 }
 
 export const ciCheck: Effect.Effect<void, AppError> = Effect.flatMap(
-  run(["nix", "run", ".#formatter", "--", "--fail-on-change"]),
+  run(["nix", "fmt", "--", "--fail-on-change"]),
   () =>
     Effect.flatMap(
-      run(["deno", "check", "lib/ci/workflows.ts", "lib/updater/main.ts"]),
+      run([
+        "deno",
+        "check",
+        "lib/ci/checks.ts",
+        "lib/ci/workflows.ts",
+        "lib/updater/main.ts",
+      ]),
       () =>
         Effect.flatMap(
           run(["deno", "lint"]),
@@ -129,13 +205,17 @@ export const ciCheck: Effect.Effect<void, AppError> = Effect.flatMap(
             Effect.flatMap(
               run(["nix", "flake", "check"]),
               () =>
-                Effect.flatMap(flakePackageTargets(), (targets) =>
-                  run([
+                Effect.flatMap(flakePackageTargets(), (targets) => {
+                  if (targets.length === 0) {
+                    return Effect.void;
+                  }
+                  return run([
                     "nix",
                     "build",
                     "--no-link",
                     ...targets,
-                  ])),
+                  ]);
+                }),
             ),
         ),
     ),
