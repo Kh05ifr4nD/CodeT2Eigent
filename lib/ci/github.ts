@@ -289,6 +289,47 @@ function runGit(args: ReadonlyArray<string>): Effect.Effect<void, AppError> {
   return Effect.map(runCommand(args, defaultCommandOptions), () => {});
 }
 
+function isMissingRemoteRef(error: AppError): boolean {
+  return error.tag === "commandNonZeroExit" &&
+    error.stderr.includes("couldn't find remote ref");
+}
+
+function fetchRemoteBranch(
+  branch: string,
+): Effect.Effect<void, AppError> {
+  return Effect.catchAll(
+    runGit(["git", "fetch", "origin", branch]),
+    (error) => (isMissingRemoteRef(error) ? Effect.void : Effect.fail(error)),
+  );
+}
+
+function isStaleInfoPush(error: AppError): boolean {
+  return error.tag === "commandNonZeroExit" &&
+    error.stderr.includes("stale info");
+}
+
+function pushBranchWithLease(branch: string): Effect.Effect<void, AppError> {
+  const push = runGit([
+    "git",
+    "push",
+    "--force-with-lease",
+    "-u",
+    "origin",
+    branch,
+  ]);
+
+  return Effect.flatMap(
+    fetchRemoteBranch(branch),
+    () =>
+      Effect.catchAll(push, (error) => {
+        if (!isStaleInfoPush(error)) {
+          return Effect.fail(error);
+        }
+        return Effect.flatMap(fetchRemoteBranch(branch), () => push);
+      }),
+  );
+}
+
 function sanitizeGitRefSegment(value: string): string {
   return value
     .trim()
@@ -375,15 +416,7 @@ export const createPr: Effect.Effect<void, AppError> = Effect.flatMap(
                   : title;
                 return Effect.flatMap(
                   runGit(["git", "commit", "-m", commitMessage, "--signoff"]),
-                  () =>
-                    runGit([
-                      "git",
-                      "push",
-                      "--force-with-lease",
-                      "-u",
-                      "origin",
-                      branch,
-                    ]),
+                  () => pushBranchWithLease(branch),
                 );
               }),
           ),
