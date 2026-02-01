@@ -22,7 +22,7 @@ jobs:
         uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
       - name: Run checks
         shell: >-
-          deno run --allow-run=deno,nix {0}
+          deno run --config=deno.jsonc --allow-run=deno,nix {0}
         run: |
           import { runMain } from "lib/common/run.ts";
           import { ciCheck } from "lib/ci/checks.ts";
