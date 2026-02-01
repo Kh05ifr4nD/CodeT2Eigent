@@ -5,7 +5,9 @@ import { buildGithubHeaders } from "../common/github.ts";
 import { fetchJson } from "../common/http.ts";
 import {
   asArray,
+  asObject,
   getField,
+  getStringField,
   type JsonArray,
   type JsonObject,
   type JsonValue,
@@ -230,11 +232,56 @@ function enableAutoMerge(
         (object) => {
           const errors = Option.flatMap(getField(object, "errors"), asArray);
           if (Option.isSome(errors) && errors.value.length > 0) {
+            const messages = errors.value
+              .map((entry) =>
+                Option.flatMap(asObject(entry), (entryObj) =>
+                  getStringField(entryObj, "message"))
+              )
+              .flatMap((message) =>
+                Option.isSome(message) ? [message.value] : []
+              );
+            if (
+              messages.some((message) =>
+                message.includes("clean status")
+              )
+            ) {
+              return mergePullRequest(token, pullRequestId);
+            }
             return Effect.fail(appError.githubGraphqlErrors(json));
           }
           return Effect.void;
         },
       ),
+  );
+}
+
+function mergePullRequest(
+  token: string,
+  pullRequestId: string,
+): Effect.Effect<void, AppError> {
+  const mutation = `
+    mutation MergePullRequest($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
+      mergePullRequest(input: { pullRequestId: $pullRequestId, mergeMethod: $mergeMethod }) {
+        clientMutationId
+      }
+    }
+  `;
+
+  return Effect.flatMap(
+    graphqlRequest(token, mutation, {
+      pullRequestId,
+      mergeMethod: "SQUASH",
+    }),
+    (json) =>
+      Effect.flatMap(requireObjectValue(json, "github.graphqlResponse"), (
+        object,
+      ) => {
+        const errors = Option.flatMap(getField(object, "errors"), asArray);
+        if (Option.isSome(errors) && errors.value.length > 0) {
+          return Effect.fail(appError.githubGraphqlErrors(json));
+        }
+        return Effect.void;
+      }),
   );
 }
 
