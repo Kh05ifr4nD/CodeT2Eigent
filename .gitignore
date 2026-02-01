@@ -1,0 +1,13 @@
+# Nix
+.direnv
+result*
+.pre-commit-config.yaml
+
+# Editor
+.vscode
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

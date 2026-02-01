@@ -1,0 +1,185 @@
+name: Update Flake
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: "Space-separated list of specific packages to update (empty for all)"
+        required: false
+        type: string
+        default: ""
+      inputs:
+        description: "Space-separated list of specific inputs to update (empty for all)"
+        required: false
+        type: string
+        default: ""
+      pr-labels:
+        description: "Comma-separated list of labels to add to PRs"
+        required: false
+        type: string
+        default: "dependencies,automated"
+      auto-merge:
+        description: "Enable auto-merge for created pull requests"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      APP_ID:
+        description: "GitHub App ID"
+        required: true
+      APP_PRIVATE_KEY:
+        description: "GitHub App private key"
+        required: true
+concurrency:
+  group: codet2eigent-update-flake
+  cancel-in-progress: false
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+      hasUpdates: ${{ steps.build-matrix.outputs.hasUpdates }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.0.3
+        with:
+          deno-version: "v2.x"
+          cache: true
+      - name: Build update matrix
+        id: build-matrix
+        env:
+          packages: ${{ inputs.packages }}
+          inputs: ${{ inputs.inputs }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat >"$RUNNER_TEMP/codet2eigent-discover.ts" <<'EOF'
+          import { runMain } from "lib/common/run.ts";
+          import { discover } from "lib/ci/workflows.ts";
+
+          await runMain(discover);
+          EOF
+
+          deno run \
+            --config=deno.jsonc \
+            --allow-env=packages,inputs,GITHUB_OUTPUT \
+            --allow-read=flake.lock,pkgs \
+            --allow-write="$GITHUB_OUTPUT" \
+            "$RUNNER_TEMP/codet2eigent-discover.ts"
+  update:
+    needs: discover
+    if: needs.discover.outputs.hasUpdates == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.discover.outputs.matrix) }}
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.0.3
+        with:
+          deno-version: "v2.x"
+          cache: true
+      - name: Setup Nix
+        uses: cachix/install-nix-action@4e002c8ec80594ecd40e759629461e26c8abed15 # v31.9.0
+      - name: Perform update
+        id: update
+        env:
+          type: ${{ matrix.type }}
+          name: ${{ matrix.name }}
+          currentVersion: ${{ matrix.currentVersion }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat >"$RUNNER_TEMP/codet2eigent-update.ts" <<'EOF'
+          import { runMain } from "lib/common/run.ts";
+          import { update } from "lib/ci/workflows.ts";
+
+          await runMain(update);
+          EOF
+
+          deno run \
+            --config=deno.jsonc \
+            --allow-env=type,name,currentVersion,GITHUB_TOKEN,GITHUB_OUTPUT \
+            --allow-read=flake.lock,pkgs \
+            --allow-write=pkgs \
+            --allow-write="$GITHUB_OUTPUT" \
+            --allow-run=git,nix \
+            --allow-net=api.github.com,registry.npmjs.org \
+            "$RUNNER_TEMP/codet2eigent-update.ts"
+      - name: Create pull request
+        if: steps.update.outputs.updated == 'true'
+        env:
+          currentVersion: ${{ matrix.currentVersion }}
+          newVersion: ${{ steps.update.outputs.newVersion }}
+          ghToken: ${{ steps.app-token.outputs.token }}
+          prLabels: ${{ inputs.pr-labels }}
+          autoMerge: ${{ inputs.auto-merge }}
+          type: ${{ matrix.type }}
+          name: ${{ matrix.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat >"$RUNNER_TEMP/codet2eigent-create-pr.ts" <<'EOF'
+          import { runMain } from "lib/common/run.ts";
+          import { createPullRequest } from "lib/ci/workflows.ts";
+
+          await runMain(createPullRequest);
+          EOF
+
+          deno run \
+            --config=deno.jsonc \
+            --allow-env=type,name,currentVersion,newVersion,ghToken,prLabels,autoMerge,GITHUB_REPOSITORY,GITHUB_OUTPUT \
+            --allow-write="$GITHUB_OUTPUT" \
+            --allow-run=git \
+            --allow-net=api.github.com \
+            "$RUNNER_TEMP/codet2eigent-create-pr.ts"
+  summary:
+    needs: [discover, update]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    if: always()
+    steps:
+      - uses: denoland/setup-deno@e95548e56dfa95d4e1a28d6f422fafe75c4c26fb # v2.0.3
+        with:
+          deno-version: "v2.x"
+          cache: true
+      - name: Summary
+        env:
+          updateResult: ${{ needs.update.result }}
+          autoMerge: ${{ inputs.auto-merge }}
+          hasUpdates: ${{ needs.discover.outputs.hasUpdates }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat >"$RUNNER_TEMP/codet2eigent-summary.ts" <<'EOF'
+          import { runMain } from "lib/common/run.ts";
+          import { summary } from "lib/ci/workflows.ts";
+
+          await runMain(summary);
+          EOF
+
+          deno run \
+            --config=deno.jsonc \
+            --allow-env=updateResult,autoMerge,hasUpdates,GITHUB_STEP_SUMMARY \
+            --allow-write="$GITHUB_STEP_SUMMARY" \
+            "$RUNNER_TEMP/codet2eigent-summary.ts"
