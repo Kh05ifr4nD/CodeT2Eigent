@@ -12,6 +12,7 @@ import {
   type JsonObject,
   type JsonValue,
   requireArrayValue,
+  requireField,
   requireNonEmptyStringField,
   requireNumberField,
   requireObjectValue,
@@ -31,6 +32,13 @@ type PullRequest = Readonly<{
   number: number;
   url: string;
   nodeId: string;
+}>;
+
+type MergeMethod = "MERGE" | "REBASE" | "SQUASH";
+
+type RepositorySettings = Readonly<{
+  defaultBranch: string;
+  mergeMethod: MergeMethod;
 }>;
 
 function githubHeaders(token: string): HeadersInit {
@@ -89,13 +97,75 @@ function decodePullRequest(
   );
 }
 
-function decodeDefaultBranch(
+function requireBooleanField(
+  object: JsonObject,
+  field: string,
+  context: string,
+): Effect.Effect<boolean, AppError> {
+  return Effect.flatMap(requireField(object, field, context), (value) => {
+    if (typeof value !== "boolean") {
+      return Effect.fail(
+        appError.invalidJson(`${context}.${field}: expected boolean`),
+      );
+    }
+    return Effect.succeed(value);
+  });
+}
+
+function resolveMergeMethod(
+  allowRebase: boolean,
+  allowSquash: boolean,
+  allowMergeCommit: boolean,
+): Option.Option<MergeMethod> {
+  if (allowRebase) {
+    return Option.some("REBASE");
+  }
+  if (allowSquash) {
+    return Option.some("SQUASH");
+  }
+  if (allowMergeCommit) {
+    return Option.some("MERGE");
+  }
+  return Option.none();
+}
+
+function decodeRepositorySettings(
   value: JsonValue,
-): Effect.Effect<string, AppError> {
+): Effect.Effect<RepositorySettings, AppError> {
   const context = "github.repository";
   return Effect.flatMap(
     requireObjectValue(value, context),
-    (object) => requireNonEmptyStringField(object, "default_branch", context),
+    (object) =>
+      Effect.flatMap(
+        Effect.all([
+          requireNonEmptyStringField(object, "default_branch", context),
+          requireBooleanField(object, "allow_rebase_merge", context),
+          requireBooleanField(object, "allow_squash_merge", context),
+          requireBooleanField(object, "allow_merge_commit", context),
+        ]),
+        ([defaultBranch, allowRebase, allowSquash, allowMergeCommit]) => {
+          const mergeMethod = resolveMergeMethod(
+            allowRebase,
+            allowSquash,
+            allowMergeCommit,
+          );
+          return Option.match(mergeMethod, {
+            onNone: () =>
+              Effect.fail(
+                appError.invalidJson(
+                  "github.repository: no merge methods enabled",
+                ),
+              ),
+            onSome: (selected) =>
+              Effect.succeed(
+                {
+                  defaultBranch,
+                  mergeMethod: selected,
+                } as const,
+              ),
+          });
+        },
+      ),
   );
 }
 
@@ -150,32 +220,27 @@ function createPullRequest(
   token: string,
   owner: string,
   repo: string,
+  base: string,
   branch: string,
   title: string,
   body: string,
 ): Effect.Effect<PullRequest, AppError> {
-  const repoPath = `/repos/${owner}/${repo}`;
-  const defaultBranch = Effect.flatMap(
-    githubRequest("GET", repoPath, token, Option.none()),
-    decodeDefaultBranch,
+  return Effect.flatMap(
+    githubRequest(
+      "POST",
+      `/repos/${owner}/${repo}/pulls`,
+      token,
+      Option.some({ title, body, head: branch, base }),
+    ),
+    decodePullRequest,
   );
-
-  return Effect.flatMap(defaultBranch, (base) =>
-    Effect.flatMap(
-      githubRequest(
-        "POST",
-        `/repos/${owner}/${repo}/pulls`,
-        token,
-        Option.some({ title, body, head: branch, base }),
-      ),
-      decodePullRequest,
-    ));
 }
 
 function createOrUpdatePullRequest(
   token: string,
   owner: string,
   repo: string,
+  base: string,
   branch: string,
   title: string,
   body: string,
@@ -185,7 +250,7 @@ function createOrUpdatePullRequest(
     (existing) =>
       Option.match(existing, {
         onNone: () =>
-          createPullRequest(token, owner, repo, branch, title, body),
+          createPullRequest(token, owner, repo, base, branch, title, body),
         onSome: (pr) =>
           updatePullRequest(token, owner, repo, pr.number, title, body),
       }),
@@ -212,6 +277,7 @@ function addLabels(
 function enableAutoMerge(
   token: string,
   pullRequestId: string,
+  mergeMethod: MergeMethod,
 ): Effect.Effect<void, AppError> {
   const mutation = `
     mutation EnableAutoMerge($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
@@ -224,7 +290,7 @@ function enableAutoMerge(
   return Effect.flatMap(
     graphqlRequest(token, mutation, {
       pullRequestId,
-      mergeMethod: "SQUASH",
+      mergeMethod,
     }),
     (json) =>
       Effect.flatMap(
@@ -245,7 +311,7 @@ function enableAutoMerge(
                 message.includes("clean status")
               )
             ) {
-              return mergePullRequest(token, pullRequestId);
+              return mergePullRequest(token, pullRequestId, mergeMethod);
             }
             return Effect.fail(appError.githubGraphqlErrors(json));
           }
@@ -258,6 +324,7 @@ function enableAutoMerge(
 function mergePullRequest(
   token: string,
   pullRequestId: string,
+  mergeMethod: MergeMethod,
 ): Effect.Effect<void, AppError> {
   const mutation = `
     mutation MergePullRequest($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) {
@@ -270,7 +337,7 @@ function mergePullRequest(
   return Effect.flatMap(
     graphqlRequest(token, mutation, {
       pullRequestId,
-      mergeMethod: "SQUASH",
+      mergeMethod,
     }),
     (json) =>
       Effect.flatMap(requireObjectValue(json, "github.graphqlResponse"), (
@@ -426,18 +493,42 @@ export const createPr: Effect.Effect<void, AppError> = Effect.flatMap(
         getRepoInfo(),
         ({ owner, repo }) =>
           Effect.flatMap(
-            createOrUpdatePullRequest(token, owner, repo, branch, title, body),
-            (pr) =>
-              Effect.flatMap(
-                addLabels(token, owner, repo, pr.number, labels),
-                () =>
-                  autoMerge
-                    ? Effect.flatMap(
-                      enableAutoMerge(token, pr.nodeId),
-                      () => Effect.succeed(pr),
-                    )
-                    : Effect.succeed(pr),
-              ),
+            githubRequest(
+              "GET",
+              `/repos/${owner}/${repo}`,
+              token,
+              Option.none(),
+            ),
+            (repoJson) =>
+              Effect.flatMap(decodeRepositorySettings(repoJson), (
+                settings,
+              ) =>
+                Effect.flatMap(
+                  createOrUpdatePullRequest(
+                    token,
+                    owner,
+                    repo,
+                    settings.defaultBranch,
+                    branch,
+                    title,
+                    body,
+                  ),
+                  (pr) =>
+                    Effect.flatMap(
+                      addLabels(token, owner, repo, pr.number, labels),
+                      () =>
+                        autoMerge
+                          ? Effect.flatMap(
+                            enableAutoMerge(
+                              token,
+                              pr.nodeId,
+                              settings.mergeMethod,
+                            ),
+                            () => Effect.succeed(pr),
+                          )
+                          : Effect.succeed(pr),
+                    ),
+                )),
           ),
       );
 
