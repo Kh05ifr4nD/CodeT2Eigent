@@ -16,17 +16,21 @@ let
   data = builtins.fromJSON (builtins.readFile ./hash.json);
   version = data.version;
   hash = data.hash;
-  cargoHash = data.cargoHash;
-in
-rustPlatform.buildRustPackage {
-  pname = "codex";
-  inherit version cargoHash;
 
   src = fetchFromGitHub {
     owner = "openai";
     repo = "codex";
     tag = "rust-v${version}";
     inherit hash;
+  };
+in
+rustPlatform.buildRustPackage {
+  pname = "codex";
+  inherit version src;
+
+  cargoLock = {
+    lockFile = "${src}/codex-rs/Cargo.lock";
+    outputHashes = data.outputHashes or { };
   };
 
   sourceRoot = "source/codex-rs";
