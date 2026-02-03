@@ -4,7 +4,8 @@ import {
   type AppError as UpdaterError,
   appError as error,
 } from "../common/error.ts";
-import { packageConfigs, resolvePackageName } from "./config.ts";
+import { resolvePackageName } from "./config.ts";
+import { discoverPackageConfigs } from "./registry.ts";
 import {
   updateGithubReleaseAssets,
   updateGithubReleaseTarball,
@@ -14,17 +15,19 @@ import {
 export function updatePackageByName(
   name: string,
 ): Effect.Effect<void, UpdaterError> {
-  const entry = packageConfigs[name];
-  if (!entry) {
-    return Effect.fail(error.unrecognizedPackage(name));
-  }
-  if (entry.kind === "github-tarball") {
-    return updateGithubReleaseTarball(name, entry.config);
-  }
-  if (entry.kind === "github-assets") {
-    return updateGithubReleaseAssets(name, entry.config);
-  }
-  return updateNpmTarball(name, entry.config);
+  return Effect.flatMap(discoverPackageConfigs(), (packageConfigs) => {
+    const entry = packageConfigs[name];
+    if (!entry) {
+      return Effect.fail(error.unrecognizedPackage(name));
+    }
+    if (entry.kind === "github-tarball") {
+      return updateGithubReleaseTarball(name, entry.config);
+    }
+    if (entry.kind === "github-assets") {
+      return updateGithubReleaseAssets(name, entry.config);
+    }
+    return updateNpmTarball(name, entry.config);
+  });
 }
 
 export function main(): Promise<void> {

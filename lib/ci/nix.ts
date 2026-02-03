@@ -15,9 +15,14 @@ import {
 } from "../common/jsonValue.ts";
 import { defaultCommandOptions, runCommand } from "../common/command.ts";
 import { gitHasChanges } from "./git.ts";
-import { packageConfigs } from "../updater/config.ts";
 import { readHashJsonVersion } from "../updater/hashJson.ts";
-import { updatePackageByName } from "../updater/main.ts";
+import {
+  type PackageConfig,
+  updateGithubReleaseAssets,
+  updateGithubReleaseTarball,
+  updateNpmTarball,
+} from "../updater/packages.ts";
+import { discoverPackageConfigs } from "../updater/registry.ts";
 
 export type MatrixEntry = Readonly<{
   type: "package" | "flake-input";
@@ -42,49 +47,51 @@ function nixOptions(
   };
 }
 
-function resolveConfiguredPackageNames(): ReadonlyArray<string> {
-  return Object.keys(packageConfigs).sort();
-}
-
-function packageHashPath(name: string): Effect.Effect<URL, AppError> {
-  const config = packageConfigs[name];
-  if (!config) {
-    return Effect.fail(appError.unrecognizedPackage(name));
+function updateConfiguredPackage(
+  name: string,
+  entry: PackageConfig,
+): Effect.Effect<void, AppError> {
+  if (entry.kind === "github-tarball") {
+    return updateGithubReleaseTarball(name, entry.config);
   }
-  return Effect.succeed(config.config.hashPath);
+  if (entry.kind === "github-assets") {
+    return updateGithubReleaseAssets(name, entry.config);
+  }
+  return updateNpmTarball(name, entry.config);
 }
 
 export function discoverPackages(
   packagesFilter: ReadonlyArray<string>,
 ): Effect.Effect<ReadonlyArray<MatrixEntry>, AppError> {
-  const allNames = resolveConfiguredPackageNames();
-  const requested = packagesFilter.length > 0
-    ? packagesFilter.slice().sort()
-    : allNames;
-  const unrecognizedPackages = requested.filter((name) =>
-    !Object.hasOwn(packageConfigs, name)
-  );
+  return Effect.flatMap(discoverPackageConfigs(), (packageConfigs) => {
+    const allNames = Object.keys(packageConfigs).sort();
+    const requested = packagesFilter.length > 0
+      ? packagesFilter.slice().sort()
+      : allNames;
+    const unrecognizedPackages = requested.filter((name) =>
+      !Object.hasOwn(packageConfigs, name)
+    );
 
-  if (unrecognizedPackages.length > 0) {
-    return Effect.fail(appError.unrecognizedPackages(unrecognizedPackages));
-  }
+    if (unrecognizedPackages.length > 0) {
+      return Effect.fail(appError.unrecognizedPackages(unrecognizedPackages));
+    }
 
-  return Effect.map(
-    Effect.forEach(
-      requested,
-      (name) =>
-        Effect.flatMap(
-          packageHashPath(name),
-          (hashPath) =>
-            Effect.map(readHashJsonVersion(hashPath), (currentVersion) => ({
-              type: "package",
-              name,
-              currentVersion,
-            } as const)),
-        ),
-    ),
-    (entries) => entries,
-  );
+    return Effect.forEach(requested, (name) => {
+      const entry = packageConfigs[name];
+      if (!entry) {
+        return Effect.fail(appError.unrecognizedPackage(name));
+      }
+
+      return Effect.map(
+        readHashJsonVersion(entry.config.hashPath),
+        (currentVersion) => ({
+          type: "package",
+          name,
+          currentVersion,
+        } as const),
+      );
+    });
+  });
 }
 
 export function discoverInputs(
@@ -128,23 +135,27 @@ export function updatePackage(
   name: string,
   currentVersion: string,
 ): Effect.Effect<UpdateResult, AppError> {
-  return Effect.flatMap(
-    packageHashPath(name),
-    (hashPath) =>
-      Effect.flatMap(
-        updatePackageByName(name),
-        () =>
-          Effect.flatMap(gitHasChanges(), (changed) => {
-            if (!changed) {
-              return Effect.succeed(updateResult(currentVersion, false));
-            }
-            return Effect.map(
-              readHashJsonVersion(hashPath),
-              (next) => updateResult(next, true),
-            );
-          }),
-      ),
-  );
+  return Effect.flatMap(discoverPackageConfigs(), (packageConfigs) => {
+    const entry = packageConfigs[name];
+    if (!entry) {
+      return Effect.fail(appError.unrecognizedPackage(name));
+    }
+
+    const hashPath = entry.config.hashPath;
+    return Effect.flatMap(
+      updateConfiguredPackage(name, entry),
+      () =>
+        Effect.flatMap(gitHasChanges(), (changed) => {
+          if (!changed) {
+            return Effect.succeed(updateResult(currentVersion, false));
+          }
+          return Effect.map(
+            readHashJsonVersion(hashPath),
+            (next) => updateResult(next, true),
+          );
+        }),
+    );
+  });
 }
 
 type FlakeLockModel = Readonly<{

@@ -1,14 +1,24 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import {
   type AppError as UpdaterError,
   appError as error,
 } from "../common/error.ts";
 import { readEnv } from "../common/env.ts";
 import { writeJsonFile } from "../common/json.ts";
-import { fetchGitHubLatestRelease, fetchNpmLatestVersion } from "./http.ts";
+import {
+  fetchGitHubFileText,
+  fetchGitHubLatestRelease,
+  fetchNpmLatestVersion,
+} from "./http.ts";
+import {
+  groupOutputHashKeysByDrvName,
+  parseGitDependenciesFromCargoLock,
+} from "./cargoLock.ts";
 import {
   fakeSha256Hash,
   inferCargoHashFromBuild,
+  inferFixedOutputHashMismatchFromBuild,
   prefetchFileHash,
 } from "./nix.ts";
 import { readHashJsonVersion } from "./hashJson.ts";
@@ -30,7 +40,9 @@ export type TarballConfig = Readonly<{
   repo: string;
   tagPrefix: string;
   hashPath: URL;
-  includeCargoHashPlaceholder: boolean;
+  cargo?:
+    | Readonly<{ kind: "cargoHash" }>
+    | Readonly<{ kind: "cargoLock"; lockFilePath: string }>;
 }>;
 
 type AssetEntry = Readonly<[platform: string, asset: string]>;
@@ -97,9 +109,22 @@ export function updateGithubReleaseTarball(
                 () =>
                   Effect.flatMap(
                     prefetchFileHash(url, { unpack: true }),
-                    (hash: string) =>
-                      config.includeCargoHashPlaceholder
-                        ? Effect.flatMap(
+                    (hash: string) => {
+                      if (!config.cargo) {
+                        return Effect.flatMap(
+                          writeJsonFile(config.hashPath, {
+                            ...basePayload,
+                            hash,
+                          }),
+                          () =>
+                            logLine(
+                              `Updated ${config.hashPath.pathname} to ${version}`,
+                            ),
+                        );
+                      }
+
+                      if (config.cargo.kind === "cargoHash") {
+                        return Effect.flatMap(
                           writeJsonFile(config.hashPath, {
                             ...basePayload,
                             hash,
@@ -125,17 +150,118 @@ export function updateGithubReleaseTarball(
                                       ),
                                   ),
                             ),
-                        )
-                        : Effect.flatMap(
-                          writeJsonFile(config.hashPath, {
-                            ...basePayload,
-                            hash,
-                          }),
-                          () =>
-                            logLine(
-                              `Updated ${config.hashPath.pathname} to ${version}`,
-                            ),
+                        );
+                      }
+
+                      const lockFilePath = config.cargo.lockFilePath;
+                      const maxIterations = 32;
+
+                      return Effect.flatMap(
+                        fetchGitHubFileText(
+                          config.owner,
+                          config.repo,
+                          lockFilePath,
+                          tag,
+                          token,
                         ),
+                        (cargoLockText) => {
+                          const gitDeps = parseGitDependenciesFromCargoLock(
+                            cargoLockText,
+                          );
+                          const drvNameToKeys = groupOutputHashKeysByDrvName(
+                            gitDeps,
+                          );
+                          const keys = Object.values(drvNameToKeys)
+                            .flatMap((value) => value)
+                            .slice()
+                            .sort();
+                          const baseOutputHashes = Object.fromEntries(
+                            keys.map((key) => [key, fakeSha256Hash] as const),
+                          );
+
+                          const resolveOutputHashes = (
+                            outputHashes: Readonly<Record<string, string>>,
+                            remaining: number,
+                          ): Effect.Effect<void, UpdaterError> => {
+                            if (remaining <= 0) {
+                              return Effect.fail(
+                                error.invalidJson(
+                                  `${name}: exceeded maximum iterations while inferring output hashes`,
+                                ),
+                              );
+                            }
+
+                            return Effect.flatMap(
+                              inferFixedOutputHashMismatchFromBuild(name),
+                              (mismatch) => {
+                                if (Option.isNone(mismatch)) {
+                                  return Effect.flatMap(
+                                    writeJsonFile(config.hashPath, {
+                                      ...basePayload,
+                                      hash,
+                                      outputHashes,
+                                    }),
+                                    () =>
+                                      logLine(
+                                        `Updated ${config.hashPath.pathname} to ${version}`,
+                                      ),
+                                  );
+                                }
+
+                                const keysForDrv = drvNameToKeys[
+                                  mismatch.value.drvName
+                                ];
+                                if (!keysForDrv) {
+                                  return Effect.fail(
+                                    error.commandNonZeroExit(
+                                      [
+                                        "nix",
+                                        "build",
+                                        `.#${name}`,
+                                        "--no-link",
+                                      ],
+                                      1,
+                                      "",
+                                      `Unknown fixed-output derivation: ${mismatch.value.drvName}`,
+                                    ),
+                                  );
+                                }
+
+                                const next: Record<string, string> = {
+                                  ...outputHashes,
+                                };
+                                for (const key of keysForDrv) {
+                                  next[key] = mismatch.value.hash;
+                                }
+
+                                return Effect.flatMap(
+                                  writeJsonFile(config.hashPath, {
+                                    ...basePayload,
+                                    hash,
+                                    outputHashes: next,
+                                  }),
+                                  () =>
+                                    resolveOutputHashes(next, remaining - 1),
+                                );
+                              },
+                            );
+                          };
+
+                          return Effect.flatMap(
+                            writeJsonFile(config.hashPath, {
+                              ...basePayload,
+                              hash,
+                              outputHashes: baseOutputHashes,
+                            }),
+                            () =>
+                              resolveOutputHashes(
+                                baseOutputHashes,
+                                maxIterations,
+                              ),
+                          );
+                        },
+                      );
+                    },
                   ),
               );
             },

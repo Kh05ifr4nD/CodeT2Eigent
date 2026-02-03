@@ -1,0 +1,10 @@
+{
+  "kind": "github-tarball",
+  "owner": "openai",
+  "repo": "codex",
+  "tagPrefix": "rust-v",
+  "cargo": {
+    "kind": "cargoLock",
+    "lockFilePath": "codex-rs/Cargo.lock"
+  }
+}
