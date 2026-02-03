@@ -4,7 +4,6 @@ import {
   type AppError as UpdaterError,
   appError as error,
 } from "../common/error.ts";
-import type { AssetsConfig, PackageConfig, TarballConfig } from "./packages.ts";
 
 function packageNameFromArgs(
   args: ReadonlyArray<string>,
@@ -39,51 +38,3 @@ export function resolvePackageName(
   }
   return Effect.fail(error.missingPackageName(args));
 }
-
-export const packageConfigs: Readonly<Record<string, PackageConfig>> = {
-  codex: {
-    kind: "github-tarball",
-    config: {
-      owner: "openai",
-      repo: "codex",
-      tagPrefix: "rust-v",
-      hashPath: new URL("../../pkgs/codex/codex/hash.json", import.meta.url),
-      includeCargoHashPlaceholder: true,
-    } satisfies TarballConfig,
-  },
-  opencode: {
-    kind: "github-assets",
-    config: {
-      owner: "anomalyco",
-      repo: "opencode",
-      tagPrefix: "v",
-      hashPath: new URL(
-        "../../pkgs/opencode/opencode/hash.json",
-        import.meta.url,
-      ),
-      assets: [
-        ["x86_64-linux", "opencode-linux-x64.tar.gz"],
-        ["aarch64-linux", "opencode-linux-arm64.tar.gz"],
-        ["x86_64-darwin", "opencode-darwin-x64.zip"],
-        ["aarch64-darwin", "opencode-darwin-arm64.zip"],
-      ],
-    } satisfies AssetsConfig,
-  },
-  "oh-my-opencode": {
-    kind: "npm-tarball",
-    config: {
-      packageName: "oh-my-opencode",
-      hashPath: new URL(
-        "../../pkgs/opencode/oh-my-opencode/hash.json",
-        import.meta.url,
-      ),
-    },
-  },
-  skills: {
-    kind: "npm-tarball",
-    config: {
-      packageName: "skills",
-      hashPath: new URL("../../pkgs/skill/skills/hash.json", import.meta.url),
-    },
-  },
-};

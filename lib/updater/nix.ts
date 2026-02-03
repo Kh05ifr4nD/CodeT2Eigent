@@ -20,6 +20,13 @@ function extractGotSha256Hash(text: string): string {
   return match && typeof match[1] === "string" ? match[1] : "";
 }
 
+function extractFixedOutputDrvName(text: string): string {
+  const match = text.match(
+    /hash mismatch in fixed-output derivation '\/nix\/store\/[0-9a-z]+-([^']+)\.drv'/,
+  );
+  return match && typeof match[1] === "string" ? match[1] : "";
+}
+
 export function inferCargoHashFromBuild(
   packageName: string,
   placeholder: string = fakeSha256Hash,
@@ -88,6 +95,40 @@ export function prefetchFileHash(
               "nix.store.prefetch-file",
             ),
         ),
+    );
+  });
+}
+
+export type FixedOutputHashMismatch = Readonly<{
+  drvName: string;
+  hash: string;
+}>;
+
+export function inferFixedOutputHashMismatchFromBuild(
+  packageName: string,
+): Effect.Effect<Option.Option<FixedOutputHashMismatch>, UpdaterError> {
+  const args = ["nix", "build", `.#${packageName}`, "--no-link"];
+  const options = { ...defaultCommandOptions, cwd: Option.some(repoRootPath) };
+
+  return Effect.flatMap(runCommandRaw(args, options), (result) => {
+    if (result.code === 0) {
+      return Effect.succeed(Option.none());
+    }
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    const drvName = extractFixedOutputDrvName(combined);
+    const hash = extractGotSha256Hash(combined);
+    if (drvName.length > 0 && hash.length > 0) {
+      return Effect.succeed(Option.some({ drvName, hash }));
+    }
+
+    return Effect.fail(
+      appError.commandNonZeroExit(
+        args,
+        result.code,
+        result.stdout,
+        result.stderr,
+      ),
     );
   });
 }
