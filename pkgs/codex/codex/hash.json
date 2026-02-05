@@ -1,6 +1,6 @@
 {
-  "version": "0.96.0",
-  "hash": "sha256-g7VCsKrZsXux/h3sBXIHAraDyrfGJv9hW/tSHnwGfUg=",
+  "version": "0.97.0",
+  "hash": "sha256-zBjp6jjMc/L1XZU+v1rw55bpvgE862Ih4MHsr9VAfKk=",
   "outputHashes": {
     "crossterm-0.28.1": "sha256-6qCtfSMuXACKFb9ATID39XyFDIEMFDmbx6SSmNe+728=",
     "nucleo-0.5.0": "sha256-Hm4SxtTSBrcWpXrtSqeO0TACbUxq3gizg1zD/6Yw/sI=",
